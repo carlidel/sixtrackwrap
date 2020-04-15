@@ -18,4 +18,5 @@ setup(
     install_requires=['numba', 'numpy', 'sixtracklib'],
     setup_requires=['numba', 'numpy', 'sixtracklib'],
     license='MIT',
+    include_package_data=True
 )

@@ -1,8 +1,49 @@
-from numba import jit, njit
+from numba import jit, njit, prange
 import numpy as np
 import sixtracklib as st
-from conversion import convert_norm_to_physical, convert_physical_to_norm
+from .conversion import convert_norm_to_physical, convert_physical_to_norm
 import warnings
+import os
+import time
+
+
+@njit(parallel=True)
+def accumulate_and_return(r, alpha, th1, th2, n_sectors):
+    tmp_1 = ((th1 + np.pi) / (np.pi * 2)) * n_sectors
+    tmp_2 = ((th2 + np.pi) / (np.pi * 2)) * n_sectors
+
+    i_1 = np.empty(tmp_1.shape, dtype=np.int32)
+    i_2 = np.empty(tmp_2.shape, dtype=np.int32)
+
+    for i in prange(i_1.shape[0]):
+        for j in range(i_1.shape[1]):
+            i_1[i, j] = int(tmp_1[i, j])
+            i_2[i, j] = int(tmp_2[i, j])
+
+    result = np.empty(r.shape[0])
+    matrices = np.empty((r.shape[0], n_sectors, n_sectors))
+    count = np.zeros((r.shape[0], n_sectors, n_sectors), dtype=np.int32)
+
+    for j in prange(r.shape[0]):
+        matrix = np.zeros((n_sectors, n_sectors)) 
+        
+        for k in range(r.shape[1]):
+            matrix[i_1[j, k], i_2[j, k]] = (
+                (matrix[i_1[j, k], i_2[j, k]] * count[j, i_1[j, k],
+                                                      i_2[j, k]] + r[j, k]) / (count[j, i_1[j, k], i_2[j, k]] + 1)
+            )
+            count[j, i_1[j, k], i_2[j, k]] += 1
+        
+        for a in range(matrix.shape[0]):
+            for b in range(matrix.shape[1]):
+                if matrix[a, b] == 0:
+                    matrix[a, b] = np.nan
+        
+        result[j] = np.power(np.nanmean(np.power(matrix, 4)), 1/4)
+        matrices[j, :, :] = matrix
+
+    return count, matrices, result
+
 
 def track_particles(x, px, y, py, n_turns):
     """Wrap Sixtracklib and track the particles requested
@@ -37,7 +78,7 @@ def track_particles(x, px, y, py, n_turns):
     particles.y += y
     particles.py += py
 
-    lattice = st.Elements.fromfile('data/beam_elements.bin')
+    lattice = st.Elements.fromfile(os.path.join(os.path.dirname(__file__), 'data/beam_elements.bin'))
     cl_job = st.TrackJob(lattice, particles, device="opencl:0.0")
 
     status = cl_job.track_until(n_turns)
@@ -77,7 +118,7 @@ def full_track_particles(radiuses, alpha, theta1, theta2, n_turns):
     particles.y += y
     particles.py += py
 
-    lattice = st.Elements.fromfile('data/beam_elements.bin')
+    lattice = st.Elements.fromfile(os.path.join(os.path.dirname(__file__), 'data/beam_elements.bin'))
     cl_job = st.TrackJob(lattice, particles, device="opencl:0.0")
 
     data_r = np.empty((len(x), n_turns))
@@ -86,9 +127,9 @@ def full_track_particles(radiuses, alpha, theta1, theta2, n_turns):
     data_th2 = np.empty((len(x), n_turns))
 
     for i in range(n_turns):
-        status = cl_job.track_until(1)
+        status = cl_job.track_until(i)
         cl_job.collect_particles()
-        
+        # print(particles.at_turn)
         t_x, t_px, t_y, t_py = convert_physical_to_norm(particles.x, particles.px, particles.y, particles.py)
         data_r[:, i], data_a[:, i], data_th1[:, i], data_th2[:, i] = cartesian_to_polar(t_x, t_px, t_y, t_py)
         
@@ -266,7 +307,7 @@ class radial_scanner(object):
         self.steps = [np.array([]) for i in range(len(alpha))]
         self.n_elements = len(alpha)
 
-    def scan(self, max_turns, min_turns, batch_size=10e4):
+    def scan(self, max_turns, min_turns, batch_size=2048):
         """Perform a radial scanning
         
         Parameters
@@ -282,7 +323,9 @@ class radial_scanner(object):
         -------
         ndarray
             step informations (array of arrays)
-        """        
+        """    
+        total_time = 0
+        time_per_iter = np.nan    
         turns_to_do = max_turns
         while True:
             n_active = 0
@@ -291,41 +334,63 @@ class radial_scanner(object):
                     n_active += 1
             
             if n_active == 0:
+                print("TOTAL ELAPSED TIME IN SECONDS: {:.2f}".format(total_time))
                 return self.steps
 
             if batch_size % n_active == 0:
-                sample_size = batch_size // n_active
+                sample_size = int(batch_size // n_active)
             else:
-                sample_size = (batch_size // n_active) + 1
+                sample_size = int(batch_size // n_active) + 1
 
-            r = np.array([])
-            a = np.array([])
-            th1 = np.array([])
-            th2 = np.array([])
+            print("Active radiuses:", n_active, "/", len(self.radiuses))
+            print("Sample size per active radius:", sample_size)
+            print("Expected execution time for step: {:.2f}".format(
+                  sample_size * n_active * time_per_iter * turns_to_do))
+
+            r = []
+            a = []
+            th1 = []
+            th2 = []
 
             for radius in self.radiuses:
                 if radius.active:
                     t_r, t_a, t_th1, t_th2 = radius.get_positions(sample_size)
-                    r = np.concatenate((r, t_r))
-                    a = np.concatenate((a, t_a))
-                    th1 = np.concatenate((th1, t_th1))
-                    th2 = np.concatenate((th2, t_th2))
+                    r.append(t_r)
+                    a.append(t_a)
+                    th1.append(t_th1)
+                    th2.append(t_th2)
+
+            r = np.asarray(r).flatten()
+            a = np.asarray(a).flatten()
+            th1 = np.asarray(th1).flatten()
+            th2 = np.asarray(th2).flatten()
 
             x, px, y, py = polar_to_cartesian(r, a, th1, th2)
             x, px, y, py = convert_norm_to_physical(x, px, y, py)
+
+            start = time.time()
+            
             particles = track_particles(x, px, y, py, turns_to_do)
+            
+            end = time.time()
+            time_per_iter = (end - start) / (sample_size * n_active * turns_to_do)
+            print("Elapsed time for whole iteration: {:.2f}".format(end - start))
+            print("Time per single iteration: {}".format(time_per_iter))
+            total_time += (end - start)
             turns = particles.at_turn
             
             i = 0
             turns_to_do = 0
+
             for j, radius in enumerate(self.radiuses):
                 if radius.active:
                     r_turns = turns[i * sample_size : (i + 1) * sample_size]
-                    if r_turns[-1] < min_turns:
+                    if min(r_turns) < min_turns:
                         radius.active = False
                     self.steps[j] = np.concatenate((self.steps[j], r_turns))
-                    turns_to_do = max(turns_to_do, r_turns[-1])
+                    turns_to_do = max(turns_to_do, min(r_turns))
                     i += 1
+            print("r:", np.max(r), ". Turns to do:", turns_to_do, ". Min found:", np.min(turns))
 
     def extract_DA(self, sample_list):
         """Gather DA radial data from the step data
@@ -340,10 +405,10 @@ class radial_scanner(object):
         ndarray
             radial values (n_elements, sample_list)
         """        
-        values = np.empty((self.n_elements, sample_list))
+        values = np.empty((self.n_elements, len(sample_list)))
         for i in range(self.n_elements):
             for j, sample in enumerate(sample_list):
-                values[i, j] = np.argmin(self.steps[i] > sample) - 1
+                values[i, j] = np.argmin(self.steps[i] >= sample) - 1
                 if values[i, j] < 0:
                     warnings.warn("Warning: you entered a too high/low sample value.")
                     values[i, j] = 0
