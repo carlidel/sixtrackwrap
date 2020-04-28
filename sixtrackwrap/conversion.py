@@ -88,11 +88,11 @@ def convert_physical_to_norm(x, vx, y, vy):
     vy -= vy_0
 
     X = x / np.sqrt(emittance * beta_x)
-    VX = 1 / np.sqrt(emittance) * (- alpha_x / np.sqrt(beta_x)
-                                   * x + 1 / np.sqrt(beta_x) * vx)
+    VX = 1 / np.sqrt(emittance) * (alpha_x / np.sqrt(beta_x)
+                                   * x + np.sqrt(beta_x) * vx)
 
     Y = y / np.sqrt(emittance * beta_y)
-    VY = 1 / np.sqrt(emittance) * (- alpha_y / np.sqrt(beta_y)
-                                * y + 1 / np.sqrt(beta_y) * vx)
+    VY = 1 / np.sqrt(emittance) * (alpha_y / np.sqrt(beta_y)
+                                   * y + np.sqrt(beta_y) * vy)
 
     return X, VX, Y, VY
