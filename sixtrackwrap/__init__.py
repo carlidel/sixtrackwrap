@@ -9,6 +9,28 @@ import time
 
 @njit(parallel=True)
 def accumulate_and_return(r, alpha, th1, th2, n_sectors):
+    """Executes a binning of the radiuses over the th1-th2 phase space.
+
+    Parameters
+    ----------
+    r : ndarray
+        shape = (alpha_sampling, n_iterations)
+    alpha : ndarray
+        shape = (alpha_sampling, n_iterations)
+    th1 : ndarray
+        shape = (alpha_sampling, n_iterations)
+    th2 : ndarray
+        shape = (alpha_sampling, n_iterations)
+    n_sectors : unsigned int
+        binning fineness
+
+    Returns
+    -------
+    tuple of stuff
+        count matrices (alpha_sampling, n_sectors, n_sectors), average matrices (alpha_sampling, n_sectors, n_sectors), results (alpha_sampling).
+        Average matrices are pure (no power is performed)
+        Result is already fully processed (powered and unpowered properly)
+    """    
     tmp_1 = ((th1 + np.pi) / (np.pi * 2)) * n_sectors
     tmp_2 = ((th2 + np.pi) / (np.pi * 2)) * n_sectors
 
@@ -49,10 +71,28 @@ def accumulate_and_return(r, alpha, th1, th2, n_sectors):
 
 
 def recursive_accumulation(count, matrices):
+    """Execute a recursive accumulation of the binning performed on the th1 th2 phase space (fineness must be a power of 2!!!)
+
+    Parameters
+    ----------
+    count : ndarray
+        count matrix (provided by accumulate_and_return)
+    matrices : ndarray
+        average matrix (provided by accumulate_and_return)
+
+    Returns
+    -------
+    tuple
+        (count matrices, average matrices, result list, validity list)
+        Average matrices are pure.
+        Results are the radiuses elevated with power 4!
+    """    
     n_sectors = count.shape[1]
     c = []
     m = []
     r = []
+    count = count.copy()
+    matrices = matrices.copy()
     validity = []
     c.append(count.copy())
     m.append(matrices.copy())
