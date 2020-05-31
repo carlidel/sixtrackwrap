@@ -1,11 +1,13 @@
 from numba import jit, njit, prange
 import numpy as np
-import sixtracklib as st
+from .sixtracklib_wrap import track_particles, full_track_particles, cartesian_to_polar, polar_to_cartesian
 from .conversion import convert_norm_to_physical, convert_physical_to_norm
 import warnings
 import os
 import time
 import pickle
+from scipy.special import erf
+import scipy.integrate as integrate
 
 
 @njit(parallel=True)
@@ -114,167 +116,6 @@ def recursive_accumulation(count, matrices):
             np.any(np.isnan(matrices), axis=(1, 2))))
         n_sectors = n_sectors // 2
     return c, m, r, np.asarray(validity, dtype=np.bool)
-
-
-def track_particles(x, px, y, py, n_turns, opencl=True):
-    """Wrap Sixtracklib and track the particles requested
-    
-    Parameters
-    ----------
-    x : ndarray
-        initial conditions
-    px : ndarray
-        initial conditions
-    y : ndarray
-        initial conditions
-    py : ndarray
-        initial conditions
-    n_turns : unsigned int
-        number of turns to perform
-    opencl : bool (optional)
-        use opencl backend (default: True)
-    
-    Returns
-    -------
-    particles object
-        Sixtracklib particles object
-    """
-    assert len(x) == len(px)
-    assert len(x) == len(py)
-    assert len(x) == len(y)
-
-    particles = st.Particles.from_ref(
-        num_particles=len(x), p0c=6.5e12)
-
-    particles.x += x
-    particles.px += px
-    particles.y += y
-    particles.py += py
-
-    lattice = st.Elements.fromfile(os.path.join(
-        os.path.dirname(__file__), 'data/beam_elements.bin'))
-    if opencl:
-        cl_job = st.TrackJob(lattice, particles, device="opencl:0.0")
-    else:
-        cl_job = st.TrackJob(lattice, particles)
-
-    status = cl_job.track_until(n_turns)
-    cl_job.collect_particles()
-    return particles
-
-
-def full_track_particles(radiuses, alpha, theta1, theta2, n_turns, opencl=True):
-    """Complete tracking of particles for the given number of turns
-    
-    Parameters
-    ----------
-    radiuses : ndarray
-        initial conditions
-    alpha : ndarray
-        initial conditions
-    theta1 : ndarrayq
-        initial conditions
-    theta2 : ndarray
-        initial conditions
-    n_turns : unsigned int
-        number of turns to perform
-    opencl : bool (optional)
-        use opencl backend (default: True)
-    
-    Returns
-    -------
-    tuple
-        (r, alpha, theta1, theta2), shape = (initial conditios, n turns)
-    """
-    x, px, y, py = polar_to_cartesian(radiuses, alpha, theta1, theta2)
-    x, px, y, py = convert_norm_to_physical(x, px, y, py)
-
-    particles = st.Particles.from_ref(
-        num_particles=len(x), p0c=6.5e12)
-
-    particles.x += x
-    particles.px += px
-    particles.y += y
-    particles.py += py
-
-    lattice = st.Elements.fromfile(os.path.join(
-        os.path.dirname(__file__), 'data/beam_elements.bin'))
-    if opencl:
-        cl_job = st.TrackJob(lattice, particles, device="opencl:0.0")
-    else:
-        cl_job = st.TrackJob(lattice, particles)
-
-    data_r = np.empty((len(x), n_turns))
-    data_a = np.empty((len(x), n_turns))
-    data_th1 = np.empty((len(x), n_turns))
-    data_th2 = np.empty((len(x), n_turns))
-
-    for i in range(n_turns):
-        status = cl_job.track_until(i)
-        cl_job.collect_particles()
-        # print(particles.at_turn)
-        t_x, t_px, t_y, t_py = convert_physical_to_norm(
-            particles.x, particles.px, particles.y, particles.py)
-        data_r[:, i], data_a[:, i], data_th1[:, i], data_th2[:,
-                                                             i] = cartesian_to_polar(t_x, t_px, t_y, t_py)
-
-    return data_r, data_a, data_th1, data_th2
-
-
-@njit
-def polar_to_cartesian(radius, alpha, theta1, theta2):
-    """Convert polar coordinates to cartesian coordinates
-    
-    Parameters
-    ----------
-    radius : ndarray
-        ipse dixit
-    alpha : ndarray
-        ipse dixit
-    theta1 : ndarray
-        ipse dixit
-    theta2 : ndarray
-        ipse dixit
-    
-    Returns
-    -------
-    tuple of ndarrays
-        x, px, y, py
-    """
-    x = radius * np.cos(alpha) * np.cos(theta1)
-    px = radius * np.cos(alpha) * np.sin(theta1)
-    y = radius * np.sin(alpha) * np.cos(theta2)
-    py = radius * np.sin(alpha) * np.sin(theta2)
-    return x, px, y, py
-
-
-@njit
-def cartesian_to_polar(x, px, y, py):
-    """Convert cartesian coordinates to polar coordinates
-    
-    Parameters
-    ----------
-    x : ndarray
-        ipse dixit
-    px : ndarray
-        ipse dixit
-    y : ndarray
-        ipse dixit
-    py : ndarray
-        ipse dixit
-    
-    Returns
-    -------
-    tuple of ndarrays
-        r, alpha, theta1, theta2
-    """
-    r = np.sqrt(np.power(x, 2) + np.power(y, 2) +
-                np.power(px, 2) + np.power(py, 2))
-    theta1 = np.arctan2(px, x)
-    theta2 = np.arctan2(py, y)
-    alpha = np.arctan2(np.sqrt(y * y + py * py),
-                       np.sqrt(x * x + px * px))
-    return r, alpha, theta1, theta2
 
 
 class radial_provider(object):
@@ -497,6 +338,21 @@ class radial_scanner(object):
             print("r:", np.max(r), ". Turns to do:",
                   turns_to_do, ". Min found:", np.min(turns))
 
+    @staticmethod
+    @njit
+    def static_extract_DA(n_elements, sample_list, steps, dr, starting_step):
+        values = np.empty((n_elements, len(sample_list)))
+        for i in prange(n_elements):
+            for j, sample in enumerate(sample_list):
+                values[i, j] = np.argmin(steps[i] >= sample) - 1
+                if values[i, j] < 0:
+                    values[i, j] = np.nan
+                else:
+                    values[i, j] = (
+                        values[i, j] + starting_step) * dr
+        return values
+
+
     def extract_DA(self, sample_list):
         """Gather DA radial data from the step data
         
@@ -510,18 +366,7 @@ class radial_scanner(object):
         ndarray
             radial values (n_elements, sample_list)
         """
-        values = np.empty((self.n_elements, len(sample_list)))
-        for i in range(self.n_elements):
-            for j, sample in enumerate(sample_list):
-                values[i, j] = np.argmin(self.steps[i] >= sample) - 1
-                if values[i, j] < 0:
-                    warnings.warn(
-                        "Warning: you entered a too high/low sample value.")
-                    values[i, j] = 0
-                else:
-                    values[i, j] = (
-                        values[i, j] + self.starting_step) * self.dr
-        return values
+        return self.static_extract_DA(self.n_elements, sample_list, self.steps, self.dr, self.starting_step)
 
     def save_values(self, f, label="SixTrack LHC no bb"):
         self.label = label
@@ -670,3 +515,149 @@ def assign_generic_gaussian(sigma_x, sigma_px, sigma_y, sigma_py):
             + 2
         )
     return f
+
+
+class uniform_scanner(object):
+    def __init__(self, top, steps, starting_radius=0.01):
+        self.top = top
+        self.steps = steps
+        self.starting_radius = starting_radius
+
+        self.coords = np.linspace(0, top, steps)
+        self.X, self.PX, self.Y, self.PY = np.meshgrid(
+            self.coords, self.coords, self.coords, self.coords)
+
+        self.bool_mask = (
+            np.power(self.X, 2)
+            + np.power(self.PX, 2)
+            + np.power(self.Y, 2)
+            + np.power(self.PY, 2)
+            >= np.power(starting_radius, 2)
+        )
+
+        self.X_f  = self.X.flatten()
+        self.PX_f = self.PX.flatten()
+        self.Y_f  = self.Y.flatten()
+        self.PY_f = self.PY.flatten()
+        self.bool_mask_f = self.bool_mask.flatten()
+
+        self.times = np.zeros_like(self.X)
+        self.times_f = self.times.flatten()
+
+    def scan(self, max_turns, opencl=True):
+        self.max_turns = max_turns
+
+        # Dummy filling
+        self.times_f[np.logical_not(self.bool_mask_f)] = max_turns
+
+        # Actual filling
+        sel_X  = self.X_f[self.bool_mask_f]
+        sel_PX = self.PX_f[self.bool_mask_f]
+        sel_Y  = self.Y_f[self.bool_mask_f]
+        sel_PY = self.PY_f[self.bool_mask_f]
+        x, px, y, py = convert_norm_to_physical(sel_X, sel_PX, sel_Y, sel_PY)
+
+        start = time.time()
+
+        particles = track_particles(
+            x, px, y, py, max_turns, opencl=opencl
+        )
+
+        print("Elapsed time for execution: {} s".format(time.time() - start))
+
+        turns = particles.at_turn
+        self.times_f[self.bool_mask_f] = turns
+        self.times = self.times_f.reshape(
+            (self.steps, self.steps, self.steps, self.steps))
+
+        return self.times
+
+    def save_values(self, f, label="SixTrack LHC no bb flat"):
+        self.label = label
+        data_dict = {
+            "label": label,
+            "top": self.top,
+            "steps": self.steps,
+            "starting_radius": self.starting_radius,
+            "times": self.times,
+            "max_turns": self.max_turns
+        }
+        with open(f, 'wb') as destination:
+            pickle.dump(data_dict, destination, protocol=4)
+
+    @classmethod
+    def load_values(cls, f):
+        with open(f, 'rb') as destination:
+            data_dict = pickle.load(destination)
+
+        instance = cls(
+            data_dict["top"],
+            data_dict["steps"],
+            data_dict["starting_radius"]
+        )
+        instance.label = data_dict["label"]
+        instance.max_turns = data_dict["max_turns"]
+        instance.times = data_dict["times"]
+        instance.times_f = data_dict["times"].flatten()
+
+        return instance
+
+    def assign_weights(self, f=lambda x, px, y, py: 1.0, radial_cut=-1.0):
+        self.weights = f(
+            self.X,
+            self.PX,
+            self.Y,
+            self.PY
+        )
+        if radial_cut == -1.0:
+            radial_cut = self.top
+
+        # Spherical boolean mask!
+
+        self.weights *= (
+            np.power(self.X, 2)
+            + np.power(self.PX, 2)
+            + np.power(self.Y, 2)
+            + np.power(self.PY, 2)
+            <= np.power(radial_cut, 2)
+        )
+    
+    def compute_loss(self, sample_list, normalization=True):
+        values = []
+        values.append(
+            integrate.trapz(
+                integrate.trapz(
+                    integrate.trapz(
+                        integrate.trapz(
+                            self.weights,
+                            x=self.PY
+                        ),
+                        x=self.Y
+                    ),
+                    x=self.PX
+                ),
+                x=self.X
+            )
+        )
+        for sample in sample_list:
+            masked_weights = self.weights * (self.times >= sample)
+            values.append(
+                integrate.trapz(
+                    integrate.trapz(
+                        integrate.trapz(
+                            integrate.trapz(
+                                masked_weights,
+                                x=self.PY
+                            ),
+                            x=self.Y
+                        ),
+                        x=self.PX
+                    ),
+                    x=self.X
+                )
+            )
+        values = np.asarray(values)
+        if normalization:
+            values /= values[0]
+        return values
+
