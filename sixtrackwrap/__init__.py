@@ -10,6 +10,11 @@ from scipy.special import erf
 import scipy.integrate as integrate
 
 
+def find_nearest(array, value):
+    array = np.asarray(array)
+    idx = (np.abs(array - value)).argmin()
+    return idx
+
 @njit(parallel=True)
 def accumulate_and_return(r, alpha, th1, th2, n_sectors):
     """Executes a binning of the radiuses over the th1-th2 phase space.
@@ -405,7 +410,50 @@ class radial_scanner(object):
         
         return instance
 
-    def assign_weights(self, f=lambda r, a, th1, th2: r):
+
+class uniform_radial_scanner(object):
+    """This class is for analyzing the loss values of a (somewhat) angular uniform scan"""
+
+    def __init__(self, baseline_samples, steps, dr, starting_step):
+        self.baseline_samples = baseline_samples
+        self.steps = steps.reshape((baseline_samples, baseline_samples, baseline_samples, -1))
+        
+        self.n_steps = self.steps.shape[-1]
+        self.dr = dr
+        self.starting_step = starting_step
+
+        for i in range(starting_step):
+            self.steps = np.concatenate(
+                (
+                    self.steps[:,:,:,0:1],
+                    self.steps
+                ),
+                axis=-1
+            )
+        
+        self.alpha_preliminary_values = np.linspace(-1.0, 1.0, baseline_samples)
+        self.alpha_values = np.arccos(self.alpha_preliminary_values) / 2
+        self.theta1_values = np.linspace(0.0, np.pi * 2.0, baseline_samples, endpoint=False)
+        self.theta2_values = np.linspace(0.0, np.pi * 2.0, baseline_samples, endpoint=False)
+
+        self.r_values = np.concatenate((
+            (np.arange(starting_step)) * dr,
+            (np.arange(self.n_steps) + starting_step) * dr
+        ))
+
+        self.n_steps = self.steps.shape[-1]
+
+        self.A, self.TH1, self.TH2, self.R = np.meshgrid(
+            self.alpha_preliminary_values, self.theta1_values, self.theta2_values, self.r_values
+        )
+
+        self.d_preliminar_alpha = self.alpha_preliminary_values[1] - \
+            self.alpha_preliminary_values[0]
+        self.d_theta1 = self.theta1_values[1] - self.theta1_values[0]
+        self.d_theta2 = self.theta2_values[1] - self.theta2_values[0]
+        self.weights = np.zeros_like(self.steps)
+
+    def assign_weights(self, f=lambda r, a, th1, th2: np.ones_like(r)):
         """Assign weights to the various radial samples computed (not-so-intuitive to setup, beware...).
 
         Parameters
@@ -422,18 +470,14 @@ class radial_scanner(object):
             th2 : float
                 the theta2 angle
         """
-        self.weights = np.zeros_like(self.steps)
-
-        for i in range(self.weights.shape[0]):
-            self.weights[i] = np.array([
+        self.weights = (
                 f(
-                    self.dr * (j + self.starting_step),
-                    self.alpha[i],
-                    self.theta1[i],
-                    self.theta2[i]
-                ) for j in range(self.weights.shape[1])
-            ])
-            self.weights[i][1:] = np.diff(self.weights[i])
+                    self.R,
+                    self.A,
+                    self.TH1,
+                    self.TH2
+                )
+            )
 
     def compute_loss(self, sample_list, cutting_point=-1.0, normalization=True):
         """Compute the loss based on a boolean masking of the various timing values.
@@ -452,20 +496,49 @@ class radial_scanner(object):
         ndarray
             the values list measured (last element is the cutting point value 1.0 used for renormalization of the other results.)
         """
-        if cutting_point > self.starting_step:
-            cutting_point = int((cutting_point / self.dr)
-                                ) - self.starting_step + 1
-            assert cutting_point < self.weights.shape[1]
-        values = np.empty(len(sample_list) + 1)
-        values[-1] = sum([np.sum(weight[:cutting_point])
-                          for weight in self.weights])
-        for i, sample in enumerate(sample_list):
-            values[i] = np.sum(self.weights * (self.steps >= sample))
-        if normalization:
-            values /= values[-1]
-        return values
+        if cutting_point != -1.0:
+            cutting_point = find_nearest(self.r_values, cutting_point)
 
-    def compute_loss_cut(self, cutting_point):
+        masked_weights = self.weights.copy()
+        masked_weights[:, :, :, cutting_point + 1 :] = 0.0
+
+        baseline = integrate.trapz(masked_weights * np.power(self.r_values, 3),
+                                   x=self.r_values)
+        baseline = np.concatenate((baseline, baseline[:,:,0:1]), axis=-1)
+        baseline = integrate.trapz(baseline,
+            x=np.concatenate((self.theta2_values, [2 * np.pi])))
+        baseline = np.concatenate((baseline, baseline[:, 0:1]), axis=-1)
+        baseline = integrate.trapz(baseline,
+            x=np.concatenate((self.theta1_values, [2 * np.pi])))
+        baseline = integrate.trapz(
+            baseline * np.sin(self.alpha_values) * np.cos(self.alpha_values),
+            x=self.alpha_values
+        )
+        
+        values = np.empty(len(sample_list))
+        
+        for i, sample in enumerate(sample_list):
+            masked_weights = self.weights.copy()
+            masked_weights[:, :, :, cutting_point + 1 :] = 0.0
+            masked_weights[self.steps < sample] = 0.0
+
+            value = integrate.trapz(
+                masked_weights * np.power(self.r_values, 3), x=self.r_values)
+            value = np.concatenate((value, value[:, :, 0:1]), axis=-1)
+            value = integrate.trapz(value, x=np.concatenate(
+                (self.theta2_values, [2 * np.pi])))
+            value = np.concatenate((value, value[:, 0:1]), axis=-1)
+            value = integrate.trapz(value, x=np.concatenate(
+                (self.theta1_values, [2 * np.pi])))
+            value = integrate.trapz(
+                value * np.sin(self.alpha_values) * np.cos(self.alpha_values), x=self.alpha_values)
+            values[i] = value
+
+        if normalization:
+            values /= baseline
+        return np.abs(values)
+
+    def compute_loss_cut(self, cutting_point=-1.0):
         """Compute the loss based on a simple DA cut.
 
         Parameters
@@ -478,43 +551,31 @@ class radial_scanner(object):
         float
             the (not-normalized) value
         """
-        cutting_point = int((cutting_point / self.dr)
-                            ) - self.starting_step + 1
-        assert cutting_point < self.weights.shape[1]
-        return sum([np.sum(weight[:cutting_point])
-                    for weight in self.weights])
+        if cutting_point != -1.0:
+            cutting_point = find_nearest(self.r_values, cutting_point)
 
+        masked_weights = self.weights.copy()
+        masked_weights[:, :, :, cutting_point + 1 :] = 0.0
 
-def assign_symmetric_gaussian(sigma=1.0):
-    def f(r, a, th1, th2):
-        return (
-            - np.exp(- ((r / sigma) ** 2) / 2) * (r ** 2 + 2 * sigma ** 2) 
-            + 2 * sigma ** 2
+        baseline = integrate.trapz(
+            masked_weights * np.power(self.r_values, 3),
+            x=self.r_values
         )
-    return f
-
-
-def assign_uniform_distribution():
-    def f(r, a, th1, th2):
-        return (
-            r ** 4 / 4
+        baseline = np.concatenate((baseline, baseline[:, :, 0:1]), axis=-1)
+        baseline = integrate.trapz(
+            baseline,
+            x=np.concatenate((self.theta2_values, [2 * np.pi]))
         )
-    return f
-
-
-def assign_generic_gaussian(sigma_x, sigma_px, sigma_y, sigma_py):
-    def f(r, a, th1, th2):
-        x, px, y, py = polar_to_cartesian(r, a, th1, th2)
-        x /= sigma_x
-        px /= sigma_px
-        y /= sigma_y
-        py /= sigma_py
-        r, a, th1, th2 = cartesian_to_polar(x, px, y, py)
-        return (
-            - np.exp(- ((r) ** 2) / 2) * (r ** 2 + 2)
-            + 2
+        baseline = np.concatenate((baseline, baseline[:, 0:1]), axis=-1)
+        baseline = integrate.trapz(
+            baseline,
+            x=np.concatenate((self.theta1_values, [2 * np.pi]))
         )
-    return f
+        baseline = integrate.trapz(
+            baseline * np.sin(self.alpha_values) * np.cos(self.alpha_values),
+            x=self.alpha_values
+        )
+        return np.abs(baseline)
 
 
 class uniform_scanner(object):
@@ -523,15 +584,20 @@ class uniform_scanner(object):
         self.steps = steps
         self.starting_radius = starting_radius
 
-        self.coords = np.linspace(0, top, steps)
+        self.coords = np.linspace(-top, top, steps * 2 + 1)
         self.X, self.PX, self.Y, self.PY = np.meshgrid(
             self.coords, self.coords, self.coords, self.coords)
 
+        self.X2 = np.power(self.X, 2)
+        self.PX2 = np.power(self.PX, 2)
+        self.Y2 = np.power(self.Y, 2)
+        self.PY2 = np.power(self.PY, 2)
+        
         self.bool_mask = (
-            np.power(self.X, 2)
-            + np.power(self.PX, 2)
-            + np.power(self.Y, 2)
-            + np.power(self.PY, 2)
+            self.X2
+            + self.PX2
+            + self.Y2
+            + self.PY2
             >= np.power(starting_radius, 2)
         )
 
@@ -624,19 +690,19 @@ class uniform_scanner(object):
     
     def compute_loss(self, sample_list, normalization=True):
         values = []
-        values.append(
+        baseline = (
             integrate.trapz(
                 integrate.trapz(
                     integrate.trapz(
                         integrate.trapz(
                             self.weights,
-                            x=self.PY
+                            x=self.coords
                         ),
-                        x=self.Y
+                        x=self.coords
                     ),
-                    x=self.PX
+                    x=self.coords
                 ),
-                x=self.X
+                x=self.coords
             )
         )
         for sample in sample_list:
@@ -647,17 +713,84 @@ class uniform_scanner(object):
                         integrate.trapz(
                             integrate.trapz(
                                 masked_weights,
-                                x=self.PY
+                                x=self.coords
                             ),
-                            x=self.Y
+                            x=self.coords
                         ),
-                        x=self.PX
+                        x=self.coords
                     ),
-                    x=self.X
+                    x=self.coords
                 )
             )
         values = np.asarray(values)
         if normalization:
-            values /= values[0]
+            values /= baseline
         return values
 
+    def compute_loss_cut(self, cut):
+        temp_weights = self.weights * (
+            self.X2
+            + self.PX2
+            + self.Y2
+            + self.PY2
+            <= np.power(cut, 2)
+        )
+        return integrate.trapz(
+            integrate.trapz(
+                integrate.trapz(
+                    integrate.trapz(
+                        temp_weights,
+                        x=self.coords
+                    ),
+                    x=self.coords
+                ),
+                x=self.coords
+            ),
+            x=self.coords
+        )
+
+
+def assign_symmetric_gaussian(sigma=1.0, polar=True):
+    if polar:
+        def f(r, a, th1, th2):
+            return (
+                np.exp(- 0.5 * np.power(r / sigma, 2)) /
+                np.power(2 * np.pi * sigma * sigma, 2)
+            )
+    else:
+        def f(x, px, y, py):
+            return(
+                np.exp(-0.5 * (np.power(x / sigma, 2.0) + np.power(y / sigma, 2.0) + np.power(py / sigma, 2.0) + np.power(px / sigma, 2.0)))
+            )
+    return f
+
+
+def assign_uniform_distribution(polar=True):
+    if polar:
+        def f(r, a, th1, th2):
+            return (
+                np.ones_like(r)
+            )
+    else:
+        def f(x, px, y, py):
+            return (
+                np.ones_like(x)
+            )
+    return f
+
+
+def assign_generic_gaussian(sigma_x, sigma_px, sigma_y, sigma_py, polar=True):
+    if polar:
+        def f(r, a, th1, th2):
+            x, px, y, py = polar_to_cartesian(r, a, th1, th2)
+            x /= sigma_x
+            px /= sigma_px
+            y /= sigma_y
+            py /= sigma_py
+            r, a, th1, th2 = cartesian_to_polar(x, px, y, py)
+            return (
+                np.exp(- np.power(r, 2) * 0.5) / (np.power(2 * np.pi, 2))
+            )
+    else:
+        assert False # Needs to be implemented lol
+    return f
