@@ -634,7 +634,7 @@ class uniform_scanner(object):
         turns = particles.at_turn
         self.times_f[self.bool_mask_f] = turns
         self.times = self.times_f.reshape(
-            (self.steps, self.steps, self.steps, self.steps))
+            (self.steps * 2 + 1, self.steps * 2 + 1, self.steps * 2 + 1, self.steps * 2 + 1))
 
         return self.times
 
