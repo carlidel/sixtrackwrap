@@ -15,8 +15,8 @@ setup(
     author_email='carlidel95@gmail.com',
     description='basic sixtracklib for my personal needs',
     packages=["sixtrackwrap"],
-    install_requires=['numba', 'numpy', 'sixtracklib'],
-    setup_requires=['numba', 'numpy', 'sixtracklib'],
+    install_requires=['numba', 'numpy'],
+    setup_requires=['numba', 'numpy'],
     license='MIT',
     include_package_data=True
 )
