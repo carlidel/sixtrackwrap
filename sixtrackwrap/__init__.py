@@ -15,6 +15,17 @@ def find_nearest(array, value):
     idx = (np.abs(array - value)).argmin()
     return idx
 
+
+def exact_cubic_root(val):
+    approx = int(val ** (1/3))
+    if approx ** 3 == val:
+        return approx
+    elif (approx + 1) ** 3 == val:
+        return approx + 1
+    else:
+        return np.nan
+
+
 @njit(parallel=True)
 def accumulate_and_return(r, alpha, th1, th2, n_sectors):
     """Executes a binning of the radiuses over the th1-th2 phase space.
@@ -210,6 +221,7 @@ class radial_provider(object):
 
 
 class radial_scanner(object):
+    """Class for analyzing various initial angular conditions"""
     def __init__(self, alpha, theta1, theta2, dr, starting_step=1):
         """Init a radial scanner object
         
@@ -415,6 +427,19 @@ class uniform_radial_scanner(object):
     """This class is for analyzing the loss values of a (somewhat) angular uniform scan"""
 
     def __init__(self, baseline_samples, steps, dr, starting_step):
+        """Init a uniform angular scanner analyzer
+
+        Parameters
+        ----------
+        baseline_samples : int
+            number of samples per angle
+        steps : ndarray
+            the raw data generated elsewhere containing the block of data
+        dr : float
+            dr step
+        starting_step : int
+            starting step
+        """        
         self.baseline_samples = baseline_samples
         self.steps = steps.reshape((baseline_samples, baseline_samples, baseline_samples, -1))
         
@@ -452,6 +477,21 @@ class uniform_radial_scanner(object):
         self.d_theta1 = self.theta1_values[1] - self.theta1_values[0]
         self.d_theta2 = self.theta2_values[1] - self.theta2_values[0]
         self.weights = np.zeros_like(self.steps)
+
+    @classmethod
+    def load_values(cls, f):
+        with open(f, 'rb') as destination:
+            data_dict = pickle.load(destination)
+        baseline_samples = exact_cubic_root(data_dict["values"].shape[0])
+        instance = cls(
+            baseline_samples,
+            data_dict["values"],
+            data_dict["dr"],
+            data_dict["starting_step"]
+        )
+        instance.max_time = data_dict["max_turns"]
+        instance.min_time = data_dict["min_turns"]
+        return instance
 
     def assign_weights(self, f=lambda r, a, th1, th2: np.ones_like(r)):
         """Assign weights to the various radial samples computed (not-so-intuitive to setup, beware...).
