@@ -493,6 +493,25 @@ class uniform_radial_scanner(object):
         instance.min_time = data_dict["min_turns"]
         return instance
 
+    @staticmethod
+    @njit
+    def static_extract_DA(n_elements, sample_list, steps, dr, starting_step):
+        values = np.empty((n_elements, n_elements, n_elements, len(sample_list)))
+        for i1 in range(n_elements):
+            for i2 in range(n_elements):
+                for i3 in range(n_elements):
+                    for j, sample in enumerate(sample_list):
+                        values[i1, i2, i3, j] = np.argmin(steps[i1, i2, i3] >= sample) - 1
+                        if values[i1, i2, i3, j] < 0:
+                            values[i1, i2, i3, j] = np.nan
+                        else:
+                            values[i1, i2, i3, j] = (
+                                values[i1, i2, i3, j] + starting_step) * dr
+        return values
+
+    def extract_DA(self, sample_list):
+        return self.static_extract_DA(self.baseline_samples, sample_list, self.steps, self.dr, self.starting_step)
+
     def assign_weights(self, f=lambda r, a, th1, th2: np.ones_like(r)):
         """Assign weights to the various radial samples computed (not-so-intuitive to setup, beware...).
 
@@ -542,15 +561,15 @@ class uniform_radial_scanner(object):
         masked_weights = self.weights.copy()
         masked_weights[:, :, :, cutting_point + 1 :] = 0.0
 
-        baseline = integrate.trapz(masked_weights * np.power(self.r_values, 3),
+        baseline = integrate.simps(masked_weights * np.power(self.r_values, 3),
                                    x=self.r_values)
         baseline = np.concatenate((baseline, baseline[:,:,0:1]), axis=-1)
-        baseline = integrate.trapz(baseline,
+        baseline = integrate.simps(baseline,
             x=np.concatenate((self.theta2_values, [2 * np.pi])))
         baseline = np.concatenate((baseline, baseline[:, 0:1]), axis=-1)
-        baseline = integrate.trapz(baseline,
+        baseline = integrate.simps(baseline,
             x=np.concatenate((self.theta1_values, [2 * np.pi])))
-        baseline = integrate.trapz(
+        baseline = integrate.simps(
             baseline * np.sin(self.alpha_values) * np.cos(self.alpha_values),
             x=self.alpha_values
         )
@@ -562,15 +581,15 @@ class uniform_radial_scanner(object):
             masked_weights[:, :, :, cutting_point + 1 :] = 0.0
             masked_weights[self.steps < sample] = 0.0
 
-            value = integrate.trapz(
+            value = integrate.simps(
                 masked_weights * np.power(self.r_values, 3), x=self.r_values)
             value = np.concatenate((value, value[:, :, 0:1]), axis=-1)
-            value = integrate.trapz(value, x=np.concatenate(
+            value = integrate.simps(value, x=np.concatenate(
                 (self.theta2_values, [2 * np.pi])))
             value = np.concatenate((value, value[:, 0:1]), axis=-1)
-            value = integrate.trapz(value, x=np.concatenate(
+            value = integrate.simps(value, x=np.concatenate(
                 (self.theta1_values, [2 * np.pi])))
-            value = integrate.trapz(
+            value = integrate.simps(
                 value * np.sin(self.alpha_values) * np.cos(self.alpha_values), x=self.alpha_values)
             values[i] = value
 
@@ -597,21 +616,21 @@ class uniform_radial_scanner(object):
         masked_weights = self.weights.copy()
         masked_weights[:, :, :, cutting_point + 1 :] = 0.0
 
-        baseline = integrate.trapz(
+        baseline = integrate.simps(
             masked_weights * np.power(self.r_values, 3),
             x=self.r_values
         )
         baseline = np.concatenate((baseline, baseline[:, :, 0:1]), axis=-1)
-        baseline = integrate.trapz(
+        baseline = integrate.simps(
             baseline,
             x=np.concatenate((self.theta2_values, [2 * np.pi]))
         )
         baseline = np.concatenate((baseline, baseline[:, 0:1]), axis=-1)
-        baseline = integrate.trapz(
+        baseline = integrate.simps(
             baseline,
             x=np.concatenate((self.theta1_values, [2 * np.pi]))
         )
-        baseline = integrate.trapz(
+        baseline = integrate.simps(
             baseline * np.sin(self.alpha_values) * np.cos(self.alpha_values),
             x=self.alpha_values
         )
@@ -731,10 +750,10 @@ class uniform_scanner(object):
     def compute_loss(self, sample_list, normalization=True):
         values = []
         baseline = (
-            integrate.trapz(
-                integrate.trapz(
-                    integrate.trapz(
-                        integrate.trapz(
+            integrate.simps(
+                integrate.simps(
+                    integrate.simps(
+                        integrate.simps(
                             self.weights,
                             x=self.coords
                         ),
@@ -748,10 +767,10 @@ class uniform_scanner(object):
         for sample in sample_list:
             masked_weights = self.weights * (self.times >= sample)
             values.append(
-                integrate.trapz(
-                    integrate.trapz(
-                        integrate.trapz(
-                            integrate.trapz(
+                integrate.simps(
+                    integrate.simps(
+                        integrate.simps(
+                            integrate.simps(
                                 masked_weights,
                                 x=self.coords
                             ),
@@ -775,10 +794,10 @@ class uniform_scanner(object):
             + self.PY2
             <= np.power(cut, 2)
         )
-        return integrate.trapz(
-            integrate.trapz(
-                integrate.trapz(
-                    integrate.trapz(
+        return integrate.simps(
+            integrate.simps(
+                integrate.simps(
+                    integrate.simps(
                         temp_weights,
                         x=self.coords
                     ),
