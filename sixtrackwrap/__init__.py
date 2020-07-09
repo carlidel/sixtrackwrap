@@ -512,6 +512,27 @@ class uniform_radial_scanner(object):
     def extract_DA(self, sample_list):
         return self.static_extract_DA(self.baseline_samples, sample_list, self.steps, self.dr, self.starting_step)
 
+    def compute_DA_standard(self, sample_list):
+        radiuses = self.extract_DA(sample_list)
+        DA = []
+
+        mod_radiuses = radiuses.copy()
+        mod_radiuses = np.power(radiuses, 4)
+        mod_radiuses1 = integrate.simps(mod_radiuses, x=self.theta1_values, axis=1)
+        mod_radiuses2 = integrate.simps(mod_radiuses1, x=self.theta2_values, axis=1)
+        mod_radiuses3 = integrate.simps(mod_radiuses2, x=self.alpha_preliminary_values, axis=0)
+
+        for i in range(len(sample_list)):
+            DA.append(
+                np.power(
+                    mod_radiuses3[i] / (2 * self.theta1_values[-1] * self.theta2_values[-1]),
+                    1/4
+                )
+            )
+
+        DA = np.asarray(DA)
+        return DA
+
     def assign_weights(self, f=lambda r, a, th1, th2: np.ones_like(r)):
         """Assign weights to the various radial samples computed (not-so-intuitive to setup, beware...).
 
