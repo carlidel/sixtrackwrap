@@ -6,7 +6,7 @@ import subprocess
 
 from setuptools import setup
 
-__version__ = '0.0.3'
+__version__ = '0.0.4'
 
 setup(
     name='sixtrackwrap',

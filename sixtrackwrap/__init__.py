@@ -10,13 +10,52 @@ from scipy.special import erf
 import scipy.integrate as integrate
 
 
-def find_nearest(array, value):
+def find_nearest(array, value, method="lower"):
+    """Given an array and a value, find the index with the nearest value
+
+    Parameters
+    ----------
+    array : ndarray
+        the array
+    value : float
+        the value
+    method : string
+        "lower", "higher", "absolute". Default is "lower"
+
+    Returns
+    -------
+    integer
+        the index
+    """    
     array = np.asarray(array)
     idx = (np.abs(array - value)).argmin()
-    return idx
+    if method == "absolute":
+        return idx
+    if method == "higher":
+        if array[idx] - value < 0:
+            return idx + 1
+        else:
+            return idx
+    if method == "lower":
+        if array[idx] - value > 0:
+            return idx - 1
+        else:
+            return idx
 
 
 def exact_cubic_root(val):
+    """If given an exact cube, returns the exact cubic root, otherwise returns nan
+
+    Parameters
+    ----------
+    val : int
+        the value
+
+    Returns
+    -------
+    int
+        the perfect cubic root
+    """    
     approx = int(val ** (1/3))
     if approx ** 3 == val:
         return approx
@@ -469,7 +508,8 @@ class uniform_radial_scanner(object):
         self.n_steps = self.steps.shape[-1]
 
         self.A, self.TH1, self.TH2, self.R = np.meshgrid(
-            self.alpha_preliminary_values, self.theta1_values, self.theta2_values, self.r_values
+            self.alpha_preliminary_values, self.theta1_values, self.theta2_values, self.r_values,
+            indexing='ij'
         )
 
         self.d_preliminar_alpha = self.alpha_preliminary_values[1] - \
@@ -666,7 +706,8 @@ class uniform_scanner(object):
 
         self.coords = np.linspace(-top, top, steps * 2 + 1)
         self.X, self.PX, self.Y, self.PY = np.meshgrid(
-            self.coords, self.coords, self.coords, self.coords)
+            self.coords, self.coords, self.coords, self.coords,
+            indexing='ij')
 
         self.X2 = np.power(self.X, 2)
         self.PX2 = np.power(self.PX, 2)
@@ -834,8 +875,7 @@ def assign_symmetric_gaussian(sigma=1.0, polar=True):
     if polar:
         def f(r, a, th1, th2):
             return (
-                np.exp(- 0.5 * np.power(r / sigma, 2)) /
-                np.power(2 * np.pi * sigma * sigma, 2)
+                np.exp(- 0.5 * np.power(r / sigma, 2))
             )
     else:
         def f(x, px, y, py):
