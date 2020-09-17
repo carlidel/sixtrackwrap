@@ -1,13 +1,13 @@
 from numba import jit, njit, prange
 import numpy as np
-from .sixtracklib_wrap import track_particles, full_track_particles, cartesian_to_polar, polar_to_cartesian
+from .sixtracklib_wrap import track_particles, full_track_particles, cartesian_to_polar, polar_to_cartesian, particle_manager
 from .conversion import convert_norm_to_physical, convert_physical_to_norm
 import warnings
 import os
 import time
 import pickle
-from scipy.special import erf
 import scipy.integrate as integrate
+from scipy.ndimage import binary_erosion, binary_dilation
 
 
 def find_nearest(array, value, method="lower"):
@@ -319,10 +319,12 @@ class radial_scanner(object):
         turns_to_do = max_turns
         while True:
             n_active = 0
+            # Are there active radiuses?
             for radius in self.radiuses:
                 if radius.active:
                     n_active += 1
 
+            # If not, stop everything and gather data
             if n_active == 0:
                 print(
                     "TOTAL ELAPSED TIME IN SECONDS: {:.2f}".format(total_time))
@@ -335,6 +337,7 @@ class radial_scanner(object):
                 self.steps = temp
                 return self.steps
 
+            # Get sample size, based on batch size
             if batch_size % n_active == 0:
                 sample_size = int(batch_size // n_active)
             else:
@@ -572,6 +575,18 @@ class uniform_radial_scanner(object):
 
         DA = np.asarray(DA)
         return DA
+
+    def compute_error_standard(self, sample_list):
+        radiuses = self.extract_DA(sample_list)
+        
+        e_alpha = np.mean(np.absolute(radiuses[1:] - radiuses[:-1]), axis=(0, 1, 2)) ** 2
+        e_theta1 = np.mean(np.absolute(radiuses[:, 1:] -
+                           radiuses[:, :-1]), axis=(0, 1, 2)) ** 2
+        e_theta2 = np.mean(np.absolute(radiuses[:, :, 1:] -
+                           radiuses[:, :, :-1]), axis=(0, 1, 2)) ** 2
+        e_radius = self.dr ** 2
+
+        return np.sqrt((e_radius + e_alpha + e_theta1 + e_theta2) / 4)
 
     def assign_weights(self, f=lambda r, a, th1, th2: np.ones_like(r)):
         """Assign weights to the various radial samples computed (not-so-intuitive to setup, beware...).
@@ -812,10 +827,10 @@ class uniform_scanner(object):
     def compute_loss(self, sample_list, normalization=True):
         values = []
         baseline = (
-            integrate.simps(
-                integrate.simps(
-                    integrate.simps(
-                        integrate.simps(
+            integrate.trapz(
+                integrate.trapz(
+                    integrate.trapz(
+                        integrate.trapz(
                             self.weights,
                             x=self.coords
                         ),
@@ -829,10 +844,10 @@ class uniform_scanner(object):
         for sample in sample_list:
             masked_weights = self.weights * (self.times >= sample)
             values.append(
-                integrate.simps(
-                    integrate.simps(
-                        integrate.simps(
-                            integrate.simps(
+                integrate.trapz(
+                    integrate.trapz(
+                        integrate.trapz(
+                            integrate.trapz(
                                 masked_weights,
                                 x=self.coords
                             ),
@@ -848,6 +863,74 @@ class uniform_scanner(object):
             values /= baseline
         return values
 
+    def compute_variants(self, sample_list, normalization=True):
+        high_err = []
+        low_err = []
+        baseline = (
+            integrate.trapz(
+                integrate.trapz(
+                    integrate.trapz(
+                        integrate.trapz(
+                            self.weights,
+                            x=self.coords
+                        ),
+                        x=self.coords
+                    ),
+                    x=self.coords
+                ),
+                x=self.coords
+            )
+        )
+        for sample in sample_list:
+            bool_original = (self.times >= sample)
+            masked_dilated_weights = self.weights * \
+                binary_dilation(bool_original)
+            masked_eroded_weights = self.weights * \
+                binary_erosion(bool_original)
+            high_err.append(
+                integrate.trapz(
+                    integrate.trapz(
+                        integrate.trapz(
+                            integrate.trapz(
+                                masked_dilated_weights,
+                                x=self.coords
+                            ),
+                            x=self.coords
+                        ),
+                        x=self.coords
+                    ),
+                    x=self.coords
+                )
+            )
+            low_err.append(
+                integrate.trapz(
+                    integrate.trapz(
+                        integrate.trapz(
+                            integrate.trapz(
+                                masked_eroded_weights,
+                                x=self.coords
+                            ),
+                            x=self.coords
+                        ),
+                        x=self.coords
+                    ),
+                    x=self.coords
+                )
+            )
+        high_err = np.asarray(high_err)
+        low_err = np.asarray(low_err)
+        if normalization:
+            high_err /= baseline
+            low_err /= baseline
+        return high_err, low_err
+
+    def compute_loss_with_error(self, sample_list, normalization=True):
+        values = self.compute_loss(sample_list, normalization)
+        high_vals, low_vals = self.compute_variants(sample_list, normalization)
+        high_err = (high_vals - values) / 2
+        low_err = (values - low_vals) / 2
+        return values, high_err, low_err
+
     def compute_loss_cut(self, cut):
         temp_weights = self.weights * (
             self.X2
@@ -856,10 +939,10 @@ class uniform_scanner(object):
             + self.PY2
             <= np.power(cut, 2)
         )
-        return integrate.simps(
-            integrate.simps(
-                integrate.simps(
-                    integrate.simps(
+        return integrate.trapz(
+            integrate.trapz(
+                integrate.trapz(
+                    integrate.trapz(
                         temp_weights,
                         x=self.coords
                     ),
@@ -914,3 +997,94 @@ def assign_generic_gaussian(sigma_x, sigma_px, sigma_y, sigma_py, polar=True):
     else:
         assert False # Needs to be implemented lol
     return f
+
+
+class partial_track(object):
+    """For manual partial tracking of particles."""
+
+    def __init__(self, radius, alpha, theta1, theta2, opencl=True):
+        self.opencl = opencl
+        self.r = radius
+        self.alpha = alpha
+        self.theta1 = theta1
+        self.theta2 = theta2
+        self.r_0 = radius.copy()
+        self.alpha_0 = alpha.copy()
+        self.theta1_0 = theta1.copy()
+        self.theta2_0 = theta2.copy()
+        
+        # make containers
+        self.step = np.zeros((alpha.size), dtype=np.int)
+
+        self.x = np.empty(alpha.size)
+        self.px = np.empty(alpha.size)
+        self.y = np.empty(alpha.size)
+        self.py = np.empty(alpha.size)
+        
+        self.X = np.empty(alpha.size)
+        self.PX = np.empty(alpha.size)
+        self.Y = np.empty(alpha.size)
+        self.PY = np.empty(alpha.size)
+
+        self.x, self.px, self.y, self.py = polar_to_cartesian(
+            self.r_0, self.alpha_0, self.theta1_0, self.theta2_0)
+        self.X, self.PX, self.Y, self.PY = convert_norm_to_physical(
+            self.x, self.px, self.y, self.py)
+
+        self.pm = particle_manager(self.X, self.PX, self.Y, self.PY, self.opencl)
+
+    def compute(self, target_turn):
+        self.pm.track_until(target_turn)
+        particles = self.pm.get_particles()
+        self.X, self.PX, self.Y, self.PY = (
+            particles.x, particles.px, particles.y, particles.py)
+        self.step = particles.at_turn
+        self.x, self.px, self.y, self.py = convert_physical_to_norm(
+            self.X, self.PX, self.Y, self.PY)
+        self.r, self.alpha, self.theta1, self.theta2 = cartesian_to_polar(
+            self.x, self.px, self.y, self.py)
+
+    def reset(self):
+        self.x, self.px, self.y, self.py = polar_to_cartesian(
+            self.r_0, self.alpha_0, self.theta1_0, self.theta2_0)
+        self.X, self.PX, self.Y, self.PY = convert_norm_to_physical(
+            self.x, self.px, self.y, self.py)
+
+        self.pm = particle_manager(self.X, self.PX, self.Y, self.PY, self.opencl)
+
+    def get_data(self):
+        """Get the data
+        
+        Returns
+        -------
+        tuple
+            (radius, alpha, theta1, theta2)
+        """
+        return self.r.copy(), self.alpha.copy(), self.theta1.copy(), self.theta2.copy(), self.step.copy()
+
+    def get_cartesian_data(self):
+        return self.x.copy(), self.px.copy(), self.y.copy(), self.py.copy(), self.step.copy()
+
+    def get_radiuses(self):
+        return self.r
+
+    def get_filtered_radiuses(self):
+        return self.r[self.pm.particles.state != 0.0]
+
+    def get_times(self):
+        return self.step
+
+    def get_action(self):
+        return np.power(self.r, 2) / 2
+
+    def get_filtered_action(self):
+        return np.power(self.r[self.pm.particles.state != 0.0], 2) / 2
+
+    def get_survival_count(self):
+        return np.count_nonzero(self.pm.particles.state != 0.0)
+
+    def get_total_count(self):
+        return self.r.size
+
+    def get_survival_rate(self):
+        return np.count_nonzero(self.pm.particles.state != 0.0) / self.r.size

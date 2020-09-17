@@ -168,7 +168,56 @@ try:
                                                                 i] = cartesian_to_polar(t_x, t_px, t_y, t_py)
 
         return data_r, data_a, data_th1, data_th2
-        
+
+
+    class particle_manager(object):
+        def __init__(self, x, px, y, py, opencl=False):
+            """
+            Parameters
+            ----------
+            x : ndarray
+                initial conditions
+            px : ndarray
+                initial conditions
+            y : ndarray
+                initial conditions
+            py : ndarray
+                initial conditions
+            opencl : bool (optional)
+                use opencl backend (default: False)
+            
+            Returns
+            -------
+            particles object
+                Sixtracklib particles object
+            """
+            assert len(x) == len(px)
+            assert len(x) == len(py)
+            assert len(x) == len(y)
+
+            self.particles = st.Particles.from_ref(
+                num_particles=len(x), p0c=6.5e12)
+
+            self.particles.x += x
+            self.particles.px += px
+            self.particles.y += y
+            self.particles.py += py
+
+            lattice = st.Elements.fromfile(os.path.join(
+                os.path.dirname(__file__), 'data/beam_elements.bin'))
+            if opencl:
+                self.cl_job = st.TrackJob(lattice, self.particles, device="opencl:0.0")
+            else:
+                self.cl_job = st.TrackJob(lattice, self.particles)
+
+        def track_until(self, target_turn):
+            status = self.cl_job.track_until(target_turn)
+            return status
+
+        def get_particles(self):
+            self.cl_job.collect_particles()
+            return self.particles
+
 except ImportError:
     print("Sixtracklib module not found! Loading dummy functions!")
 
@@ -177,3 +226,13 @@ except ImportError:
 
     def full_track_particles(radiuses, alpha, theta1, theta2, n_turns, opencl=True):
         pass
+
+    class particle_manager(object):
+        def __init__(self, x, px, y, py, opencl=False):
+            pass
+
+        def track_until(self, target_turn):
+            pass
+
+        def get_particles(self):
+            pass
